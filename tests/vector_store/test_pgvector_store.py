@@ -63,29 +63,37 @@ TEST_CONNECTION_STRING = os.getenv(
 
 @pytest.fixture(scope="module")
 def pg_available() -> bool:
-    """Check if PostgreSQL with pgvector is available."""
+    """Check if PostgreSQL with pgvector is available.
+
+    A connection failure only means "skip" when TEST_PGVECTOR_URL wasn't set
+    explicitly, i.e. this is a local run falling back to the documented
+    default. CI sets it on purpose, so a failure there means the service is
+    genuinely broken and the suite should fail loudly instead of skipping.
+    """
     if not psycopg_available:
         return False
 
+    explicit_url = "TEST_PGVECTOR_URL" in os.environ
+
     try:
-        if psycopg_available:
-            try:
-                import psycopg
+        try:
+            import psycopg
 
-                conn = psycopg.connect(TEST_CONNECTION_STRING, connect_timeout=5)
-            except ImportError:
-                import psycopg2
+            conn = psycopg.connect(TEST_CONNECTION_STRING, connect_timeout=5)
+        except ImportError:
+            import psycopg2
 
-                conn = psycopg2.connect(TEST_CONNECTION_STRING, connect_timeout=5)
+            conn = psycopg2.connect(TEST_CONNECTION_STRING, connect_timeout=5)
 
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            cur.close()
-            conn.close()
-            return True
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        conn.close()
+        return True
     except Exception:
+        if explicit_url:
+            raise
         return False
-    return False
 
 
 @pytest.fixture
@@ -193,7 +201,11 @@ class TestPgVectorStoreAdd:
         assert len(ids) == 5
         assert len(set(ids)) == 5
         # add() assigns uuid4 identifiers, not a "vec_" prefix
-        assert all(uuid.UUID(vector_id) for vector_id in ids)
+        for vector_id in ids:
+            try:
+                uuid.UUID(vector_id)
+            except ValueError:
+                pytest.fail(f"{vector_id!r} is not a valid uuid4 id")
 
     def test_add_auto_generate_ids(self, store):
         """Test that IDs are auto-generated if not provided."""
@@ -323,25 +335,6 @@ class TestPgVectorStoreSearch:
                 empty_store.close()
             except Exception:
                 pass
-
-        # Cleanup: Drop test table after test completes
-        # Uses best-effort cleanup - failures are silently ignored since
-        # this is teardown of optional test resources
-        try:
-            with empty_store._get_connection() as conn:
-                cur = conn.cursor()
-                from semantica.vector_store.pgvector_store import psycopg_sql
-                drop_sql = psycopg_sql.SQL("DROP TABLE IF EXISTS {}").format(
-                    psycopg_sql.Identifier(unique_table_name)
-                )
-                cur.execute(drop_sql)
-                conn.commit()
-                cur.close()
-            empty_store.close()
-        except Exception:
-            # Best-effort cleanup: PostgreSQL may be unavailable during teardown
-            # This is expected when tests are skipped or connection is lost
-            pass
 
 
 class TestPgVectorStoreGet:

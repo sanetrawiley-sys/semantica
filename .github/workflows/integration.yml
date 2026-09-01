@@ -8,6 +8,7 @@ permissions:
 
 on:
   pull_request:
+    branches: [main]
     paths-ignore:
       - 'docs/**'
       - 'docs_check.py'
@@ -53,9 +54,18 @@ jobs:
           cache: 'pip'
 
       - name: Install semantica with the pgvector extra
+        # Hash-verified installs throughout, matching ci.yml/security.yml/etc
+        # (OpenSSF Scorecard's Pinned-Dependencies check). --no-deps here
+        # skips runtime dependency resolution for the editable install itself
+        # (nothing to hash); pep517-build.txt + --no-build-isolation stops
+        # its PEP 517 build from separately fetching an unhashed
+        # setuptools/wheel via build isolation.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[vectorstore-pgvector]" pytest==9.1.1
+          pip install -r .github/requirements/bootstrap.txt --require-hashes
+          pip install -r .github/requirements/pep517-build.txt --require-hashes
+          pip install --no-deps --no-build-isolation -e .
+          pip install -r .github/requirements/pgvector-extra.txt --require-hashes
+          pip install -r .github/requirements/pytest-tool.txt --require-hashes
 
       - name: Create the vector extension
         # PgVectorStore._verify_pgvector_extension() requires it and refuses to
@@ -73,27 +83,9 @@ jobs:
           PY
 
       - name: Run the live pgvector suite
+        # pg_available raises rather than skipping when TEST_PGVECTOR_URL was
+        # set explicitly (which this job always does), so a service that's
+        # actually unreachable fails this step instead of the suite quietly
+        # reporting green having run nothing.
         run: |
-          pytest tests/vector_store/test_pgvector_store.py -v -rs \
-            --junit-xml=junit.xml
-
-      - name: Fail if the suite skipped instead of running
-        # The suite skips itself when it cannot reach Postgres, so pytest would
-        # exit 0 having run nothing. Without this the job is green either way.
-        if: always()
-        run: |
-          python - <<'PY'
-          import sys
-          import xml.etree.ElementTree as ET
-
-          root = ET.parse("junit.xml").getroot()
-          suites = root.findall("testsuite") or [root]
-          total = sum(int(s.get("tests", 0)) for s in suites)
-          skipped = sum(int(s.get("skipped", 0)) for s in suites)
-
-          if total == 0:
-              sys.exit("no tests were collected")
-          if skipped:
-              sys.exit(f"{skipped} of {total} tests skipped; the live suite did not run")
-          print(f"{total} tests ran, none skipped")
-          PY
+          pytest tests/vector_store/test_pgvector_store.py -v -rs
